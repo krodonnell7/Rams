@@ -1,0 +1,785 @@
+---
+title: "HW3"
+format: docx
+editor: visual
+---
+
+## 1. Required Packages
+
+```{r}
+library(tidyverse)
+library(modelr)
+library(nflreadr)
+library(ggimage)
+```
+
+## 2. Importing Data
+
+It is a good rule of thumb to shape team metrics based on 3 seasons worth of data. This give a good balance of high number of observations, and relevancy in terms of recent trends and any types of rule changes affecting the game.
+
+We'll want to base things off of regular season, so that will need to be in the filter.
+
+```{r}
+pbp<- load_pbp(seasons = 2020:2022)
+
+pbp %>%
+  filter(season_type == "REG") -> pbp
+```
+
+## 3. Generating a table of outcomes
+
+It will be import to understand how team's performed from an outcome standpoint each season. There are several lines of code involved, some that may be difficult to understand, but more import just to utilize as a way to get the outcome information for nfl play by play data.
+
+```{r}
+  outcomes <- pbp %>%
+    group_by(season, game_id, home_team) %>%
+    summarize(
+      home_win = if_else(sum(result) > 0, 1, 0),
+      home_tie = if_else(sum(result) == 0, 1, 0),
+      home_diff = last(result),
+      home_pts_for = last(home_score),
+      home_pts_against = last(away_score)
+    ) %>%
+    group_by(season, home_team) %>%
+    summarize(
+      home_games = n(),
+      home_wins = sum(home_win),
+      home_ties = sum(home_tie),
+      home_diff = sum(home_diff),
+      home_pts_for = sum(home_pts_for),
+      home_pts_against = sum(home_pts_against)
+    ) %>%
+    ungroup() %>%
+    left_join(
+      # away games
+      pbp %>%
+        group_by(season, game_id, away_team) %>%
+        summarize(
+          away_win = if_else(sum(result) < 0, 1, 0),
+          away_tie = if_else(sum(result) == 0, 1, 0),
+          away_diff = last(result)*-1,
+          away_pts_for = last(away_score),
+          away_pts_against = last(home_score)
+        ) %>%
+        group_by(season, away_team) %>%
+        summarize(
+          away_games = n(),
+          away_wins = sum(away_win),
+          away_ties = sum(away_tie),
+          away_diff = sum(away_diff),
+          away_pts_for = sum(away_pts_for),
+          away_pts_against = sum(away_pts_against)
+        ) %>%
+        ungroup(),
+      by = c("season", "home_team" = "away_team")
+    ) %>%
+    rename(team = "home_team") %>%
+    mutate(
+      games = home_games + away_games,
+      wins = home_wins + away_wins,
+      ties = home_ties + away_ties,
+      losses = games - wins - ties,
+      point_diff = home_diff + away_diff,
+      points_for = home_pts_for + away_pts_for,
+      points_against = home_pts_against + away_pts_against) %>%
+    select(season, team, games, wins, losses, ties, point_diff, points_for, points_against )
+```
+
+## 4. Generating the Metrics table
+
+It will be important to create an aggregate table by team and season for the metrics you are interested in evaluating. Consider this a candidate list of KPIs (not the final set). We will look at the following for the NFL: Passing yards per play, Passing epa per play, Run yards per play, Run epa per play, and Special teams epa per play. Will will calculate these for both offense and defense.
+
+```{r}
+ metrics <- pbp %>% 
+    filter(pass == 1 & !is.na(epa) | 
+      rush == 1 & !is.na(epa) | special == 1 & !is.na(epa)
+      ) %>% 
+    group_by(season, posteam) %>% 
+      summarize(
+        n_pass = sum(pass),
+        n_rush = sum(rush),
+        n_special = sum(special),
+        epa_per_pass = sum(epa*pass)/n_pass,
+        epa_per_rush = sum(epa*rush)/n_rush,
+        y_per_pass = sum(yards_gained*pass, na.rm = TRUE)/n_pass,
+        y_per_rush = sum(yards_gained*rush, na.rm = TRUE)/n_rush,
+        st_epa_per_play = sum(epa*special)/n_special
+      ) %>% 
+    left_join(
+      pbp %>%
+        filter(pass == 1 & !is.na(epa) | 
+      rush == 1 & !is.na(epa) | special == 1 & !is.na(epa)
+      ) %>% 
+    group_by(season, defteam) %>% 
+      summarize(
+        def_n_pass=sum(pass),
+        def_n_rush=sum(rush),
+        def_n_special = sum(special),
+        def_epa_per_pass=sum(-epa*pass)/def_n_pass,
+        def_epa_per_rush=sum(-epa*rush)/def_n_rush,
+        def_y_per_pass = sum(yards_gained*pass, na.rm = TRUE)/def_n_pass,
+        def_y_per_rush = sum(yards_gained*rush, na.rm = TRUE)/def_n_rush,
+        def_st_epa_per_play = sum(-epa*special)/def_n_special
+      ),
+    by = c("season", "posteam" = "defteam")
+    ) %>% 
+    rename(team = "posteam") %>% 
+    select(-n_pass, -n_rush, -n_special,-def_n_pass, -def_n_rush, -def_n_special)
+
+```
+
+## 5. Joining the outcomes and metrics table
+
+```{r}
+  df <- outcomes %>% 
+    left_join(metrics, by = c("season", "team"))
+```
+
+Since the NFL moved to 17 regular season games in 2021, we'll create a win_pct column:
+
+```{r}
+df %>%
+  mutate(Win_pct = wins/ games) -> df
+```
+
+Adding a playoffs Y/N column
+
+```{r}
+playoffs2020 <- c(0, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 1, 1, 1)
+playoffs2021 <- c(1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 1, 0, 0, 0, 1, 1, 0, 1, 0, 0, 1, 0, 0, 0, 1, 1, 0, 1, 1, 1, 0)
+playoffs2022 <- c(0, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 1, 0, 1, 0, 1, 1, 0, 0, 1, 0, 1, 0, 1, 1, 1, 0, 0)
+playoffs <- c(playoffs2020, playoffs2021, playoffs2022)
+
+df <- cbind(df, playoffs)
+df$playoffs <- as.factor(df$playoffs)
+```
+
+## 6. Comparing Playoff to Non-Playoff Teams
+
+```{r}
+
+df %>% group_by(playoffs) %>%
+  summarise_all(mean)
+
+df %>% filter(team=="LA")
+
+#pass epa plots
+for (i in 2020:2022) {
+  epa_density_plot <- df %>%
+  #filter(season==i) %>%
+  ggplot(aes(x=epa_per_pass, fill=playoffs, group=playoffs)) +
+  geom_density(alpha=.25) +
+  #geom_vline(xintercept = mean((df %>% filter(playoffs==0, season==i))$epa_per_pass), linetype = "dashed", color="red") +
+  #geom_vline(xintercept = mean((df %>% filter(playoffs==1, season==i))$epa_per_pass), linetype = "dashed", color="darkgreen") +
+  geom_vline(xintercept = mean((df %>% filter(team=="LA", season==i))$epa_per_pass), color="#003594", linetype = "dashed") +
+    labs(title = paste0("EPA Per Pass for Playoff vs Non-Playoff Teams from 2020-2022"), 
+         subtitle = paste0("Where do the ", i, " LA Rams Fall?"),
+         y="Density",
+         x="EPA/Pass") +
+    guides(fill=guide_legend("Playoff Team?")) +
+        theme_minimal()+
+    theme(plot.title = element_text(hjust = 0.5, color = "#003594"), plot.subtitle = element_text(hjust = 0.5, color = "#FF8200"), legend.position = "bottom") +
+    scale_fill_discrete(labels=c('No', 'Yes')) +
+    geom_image(mapping = aes(x=-0.09550263, y=4.2, image="https://upload.wikimedia.org/wikipedia/en/thumb/8/8a/Los_Angeles_Rams_logo.svg/100px-Los_Angeles_Rams_logo.svg.png"), size=.1, asp=1.8)
+
+  
+  print(epa_density_plot)
+}
+
+#rush epa plots
+for (i in 2020:2022) {
+  epa_density_plot <- df %>%
+  #filter(season==i) %>%
+  ggplot(aes(x=epa_per_rush, fill=playoffs, group=playoffs)) +
+  geom_density(alpha=.25) +
+  #geom_vline(xintercept = mean((df %>% filter(playoffs==0, season==i))$epa_per_rush), linetype = "dashed", color="red") +
+  #geom_vline(xintercept = mean((df %>% filter(playoffs==1, season==i))$epa_per_rush), linetype = "dashed", color="darkgreen") +
+  geom_vline(xintercept = mean((df %>% filter(team=="LA", season==i))$epa_per_rush), color="blue", linetype = "dashed") +
+    labs(title = paste0("EPA Per Rush for Playoff vs Non-Playoff Teams from 2020-2022"), 
+         subtitle = paste0("Where do the ", i, " LA Rams Fall?"),
+         y="Density",
+         x="EPA/Rush") +
+    guides(fill=guide_legend("Playoff Team?")) +
+        theme_minimal()+
+    theme(plot.title = element_text(hjust = 0.5, color = "#003594"), plot.subtitle = element_text(hjust = 0.5, color = "#FF8200"), legend.position = "bottom") +
+    scale_fill_discrete(labels=c('No', 'Yes')) +
+    geom_image(mapping = aes(x=mean((df %>% filter(team=="LA", season==i))$epa_per_rush), y=1.2, image="https://upload.wikimedia.org/wikipedia/en/thumb/8/8a/Los_Angeles_Rams_logo.svg/100px-Los_Angeles_Rams_logo.svg.png"), size=.1, asp=1.8)
+
+  
+  print(epa_density_plot)
+}
+
+#defensive pass epa 
+for (i in 2020:2022) {
+  epa_density_plot <- df %>%
+  #filter(season==i) %>%
+  ggplot(aes(x=def_epa_per_pass, fill=playoffs, group=playoffs)) +
+  geom_density(alpha=.25) +
+  #geom_vline(xintercept = mean((df %>% filter(playoffs==0, season==i))$def_epa_per_pass), linetype = "dashed", color="red") +
+  #geom_vline(xintercept = mean((df %>% filter(playoffs==1, season==i))$def_epa_per_pass), linetype = "dashed", color="darkgreen") +
+  geom_vline(xintercept = mean((df %>% filter(team=="LA", season==i))$def_epa_per_pass), color="blue", linetype = "dashed") +
+    labs(title = paste0("Defensive EPA Per Pass for Playoff vs Non-Playoff Teams from 2020-2022"), 
+         subtitle = paste0("Where do the ", i, " LA Rams Fall?"),
+         y="Density",
+         x="Defensive EPA/Pass") +
+    guides(fill=guide_legend("Playoff Team?")) +
+        theme_minimal()+
+    theme(plot.title = element_text(hjust = 0.5, color = "#003594"), plot.subtitle = element_text(hjust = 0.5, color = "#FF8200"), legend.position = "bottom") +
+    scale_fill_discrete(labels=c('No', 'Yes')) +
+    geom_image(mapping = aes(x=mean((df %>% filter(team=="LA", season==i))$def_epa_per_pass), y=5, image="https://upload.wikimedia.org/wikipedia/en/thumb/8/8a/Los_Angeles_Rams_logo.svg/100px-Los_Angeles_Rams_logo.svg.png"), size=.1, asp=1.8)
+    
+  
+  print(epa_density_plot)
+}
+
+#defensive rush epa 
+for (i in 2020:2022) {
+  epa_density_plot <- df %>%
+  #filter(season==i) %>%
+  ggplot(aes(x=def_epa_per_rush, fill=playoffs, group=playoffs)) +
+  geom_density(alpha=.25) +
+  #geom_vline(xintercept = mean((df %>% filter(playoffs==0, season==i))$def_epa_per_rush), linetype = "dashed", color="red") +
+  #geom_vline(xintercept = mean((df %>% filter(playoffs==1, season==i))$def_epa_per_rush), linetype = "dashed", color="darkgreen") +
+  geom_vline(xintercept = mean((df %>% filter(team=="LA", season==i))$def_epa_per_rush), color="blue", linetype = "dashed") +
+    labs(title = paste0("Defensive EPA Per Rush for Playoff vs Non-Playoff Teams from 2020-2022"), 
+         subtitle = paste0("Where do the ", i, " LA Rams Fall?"),
+         y="Density",
+         x="Defensive EPA/Rush") +
+    guides(fill=guide_legend("Playoff Team?")) +
+        theme_minimal()+
+    theme(plot.title = element_text(hjust = 0.5, color = "#003594"), plot.subtitle = element_text(hjust = 0.5, color = "#FF8200"), legend.position = "bottom") +
+    scale_fill_discrete(labels=c('No', 'Yes')) +
+    geom_image(mapping = aes(x=mean((df %>% filter(team=="LA", season==i))$def_epa_per_rush), y=5.5, image="https://upload.wikimedia.org/wikipedia/en/thumb/8/8a/Los_Angeles_Rams_logo.svg/100px-Los_Angeles_Rams_logo.svg.png"), size=.1, asp=1.8)
+  
+  print(epa_density_plot)
+}
+
+
+logos <- nflreadr::load_teams()
+
+df %>%
+  inner_join(logos, by = c("team" = "team_abbr")) -> df2
+
+#scatterplots for pass vs rush epa
+for (i in 2020:2022) {
+  scatterplot <- df2 %>% 
+  filter(season==i) %>%
+  mutate(selected_team = ifelse(playoffs==1 | team=="LA", 0.9, 0.3), rams= ifelse(team=="LA", 1, 0)) %>% 
+  ggplot(aes(x = epa_per_rush, y = epa_per_pass)) +
+  geom_abline(slope = -1.5, intercept = seq(0.4, -0.3, -0.1), alpha = .2) +
+  geom_vline(xintercept = mean((df2 %>% filter(playoffs==1))$epa_per_rush), color="red", linetype="dashed") +
+  geom_hline(yintercept = mean((df2 %>% filter(playoffs==1))$epa_per_pass), color="red", linetype="dashed") +
+  geom_point(aes(alpha = rams, color = rams), size = 12, show.legend = F) +
+  scale_colour_gradient(low = "white", high = "yellow") +
+ geom_nfl_logos(aes(team_abbr = team, alpha = selected_team), width = 0.065, show.legend = F) +
+  labs(
+    x = "Rush EPA/play",
+    y = "Pass EPA/play",
+    title = paste0(i, " NFL Pass and Rush EPA per Play")
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = ggplot2::element_text(face = "bold"),
+    plot.title.position = "plot"
+  ) 
+  
+  print(scatterplot)
+}
+
+
+#scatterplots for defensive pass vs rush epa
+for (i in 2020:2022) {
+  scatterplot <- df2 %>% 
+  filter(season==i) %>%
+  mutate(selected_team = ifelse(playoffs==1 | team=="LA", 0.9, 0.3), rams= ifelse(team=="LA", 1, 0)) %>%   ggplot(aes(x = def_epa_per_rush, y = def_epa_per_pass)) +
+  geom_abline(slope = -1.5, intercept = seq(0.4, -0.3, -0.1), alpha = .2) +
+  geom_vline(xintercept = mean((df2 %>% filter(playoffs==1))$def_epa_per_rush), color="red", linetype="dashed") +
+  geom_hline(yintercept = mean((df2 %>% filter(playoffs==1))$def_epa_per_pass), color="red", linetype="dashed") +
+  geom_point(aes(alpha = rams, color = rams), size = 12, show.legend = F) +
+  scale_colour_gradient(low = "white", high = "yellow") +
+ geom_nfl_logos(aes(team_abbr = team, alpha = selected_team), width = 0.065, show.legend = F) +
+  labs(
+    x = "Defensive Rush EPA/play",
+    y = "Defensive Pass EPA/play",
+    title = paste0(i, " NFL Defensive Pass and Rush EPA per Play")
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = ggplot2::element_text(face = "bold"),
+    plot.title.position = "plot"
+  )
+  
+  print(scatterplot)
+}
+
+
+# highlight rams in yellow, unblur playoff teams
+# choose whether to compare to just season playoff teams or 2020-2022 playoff teams
+
+library(gt)
+
+df2 %>%
+  filter(season==2022) %>%
+  filter(team=="LA" | playoffs==1) %>%
+  group_by(playoffs) %>%
+  summarise(mean = mean(def_epa_per_pass)) %>%
+  gt() %>%
+  fmt_number(columns = "mean", decimals = 3)
+
+
+
+
+```
+
+## 7. Specific KPIs
+
+```{r}
+ metrics_4Q <- pbp %>% 
+    filter(pass == 1 & !is.na(epa) | 
+      rush == 1 & !is.na(epa) | special == 1 & !is.na(epa), qtr==4, abs(score_differential) <= 16
+      ) %>% 
+    group_by(season, posteam) %>% 
+      summarize(
+        n_pass = sum(pass),
+        n_rush = sum(rush),
+        n_special = sum(special),
+        epa_per_pass = sum(epa*pass)/n_pass,
+        epa_per_rush = sum(epa*rush)/n_rush,
+        y_per_pass = sum(yards_gained*pass, na.rm = TRUE)/n_pass,
+        y_per_rush = sum(yards_gained*rush, na.rm = TRUE)/n_rush,
+        st_epa_per_play = sum(epa*special)/n_special
+      ) %>% 
+    left_join(
+      pbp %>%
+        filter(pass == 1 & !is.na(epa) | 
+      rush == 1 & !is.na(epa) | special == 1 & !is.na(epa), qtr==4
+      ) %>% 
+    group_by(season, defteam) %>% 
+      summarize(
+        def_n_pass=sum(pass),
+        def_n_rush=sum(rush),
+        def_n_special = sum(special),
+        def_epa_per_pass=sum(-epa*pass)/def_n_pass,
+        def_epa_per_rush=sum(-epa*rush)/def_n_rush,
+        def_y_per_pass = sum(yards_gained*pass, na.rm = TRUE)/def_n_pass,
+        def_y_per_rush = sum(yards_gained*rush, na.rm = TRUE)/def_n_rush,
+        def_st_epa_per_play = sum(-epa*special)/def_n_special
+      ),
+    by = c("season", "posteam" = "defteam")
+    ) %>% 
+    rename(team = "posteam") %>% 
+    select(-n_pass, -n_rush, -n_special,-def_n_pass, -def_n_rush, -def_n_special)
+ 
+metrics_4Q <- cbind(metrics_4Q, playoffs)
+metrics_4Q$playoffs <- as.factor(metrics_4Q$...13)
+metrics_4Q$...13 <- NULL
+
+
+
+ metrics_4Q_Rams_sections <- pbp %>% 
+    filter(pass == 1 & !is.na(epa) | 
+      rush == 1 & !is.na(epa) | special == 1 & !is.na(epa), qtr==4, abs(score_differential) <= 16
+      ) %>% 
+   mutate(section = case_when(week %in% 1:12 ~ 1,
+                              week %in% 13:18 ~ 2)) %>%
+    group_by(season, posteam, section) %>% 
+      summarize(
+        n_pass = sum(pass),
+        n_rush = sum(rush),
+        n_special = sum(special),
+        epa_per_pass = sum(epa*pass)/n_pass,
+        epa_per_rush = sum(epa*rush)/n_rush,
+        y_per_pass = sum(yards_gained*pass, na.rm = TRUE)/n_pass,
+        y_per_rush = sum(yards_gained*rush, na.rm = TRUE)/n_rush,
+        st_epa_per_play = sum(epa*special)/n_special
+      ) %>% 
+    left_join(
+      pbp %>%
+        filter(pass == 1 & !is.na(epa) | 
+      rush == 1 & !is.na(epa) | special == 1 & !is.na(epa), qtr==4
+      ) %>% 
+        mutate(section = case_when(week %in% 1:12 ~ 1,
+                              week %in% 13:18 ~ 2)) %>%
+    group_by(season, defteam, section) %>% 
+      summarize(
+        def_n_pass=sum(pass),
+        def_n_rush=sum(rush),
+        def_n_special = sum(special),
+        def_epa_per_pass=sum(-epa*pass)/def_n_pass,
+        def_epa_per_rush=sum(-epa*rush)/def_n_rush,
+        def_y_per_pass = sum(yards_gained*pass, na.rm = TRUE)/def_n_pass,
+        def_y_per_rush = sum(yards_gained*rush, na.rm = TRUE)/def_n_rush,
+        def_st_epa_per_play = sum(-epa*special)/def_n_special
+      ),
+    by = c("season", "posteam" = "defteam")
+    ) %>% 
+    rename(team = "posteam") %>% 
+    select(-n_pass, -n_rush, -n_special,-def_n_pass, -def_n_rush, -def_n_special) %>%
+   filter(team=="LA", season==2022)
+
+metrics_4Q_Rams_sections <- cbind(metrics_4Q_Rams_sections, c(0,0,0,0))
+metrics_4Q_Rams_sections$playoffs <- as.factor(metrics_4Q_Rams_sections$...15)
+metrics_4Q_Rams_sections$...15 <- NULL
+metrics_4Q_Rams_sections$section.x <- NULL
+metrics_4Q_Rams_sections$section.y <- NULL
+
+metrics_4Q <- metrics_4Q %>%
+  filter(!(team == "LA" & season ==2022))
+metrics_4Q <- rbind(metrics_4Q, metrics_4Q_Rams_sections)
+
+#week breakdowns
+
+```
+
+## 8. Comparing Playoff to Non-Playoff Teams (4th Quarter)
+
+```{r}
+
+metrics_4Q %>% group_by(playoffs) %>%
+  summarise_all(mean)
+
+metrics_4Q %>% filter(team=="LA")
+
+#pass epa plots
+for (i in 2020:2022) {
+  epa_density_plot <- metrics_4Q %>%
+  #filter(season==i) %>%
+  ggplot(aes(x=epa_per_pass, fill=playoffs, group=playoffs)) +
+  geom_density(alpha=.25) +
+  #geom_vline(xintercept = mean((metrics_4Q %>% filter(playoffs==0, season==i))$epa_per_pass), linetype = "dashed", color="red") +
+  #geom_vline(xintercept = mean((metrics_4Q %>% filter(playoffs==1, season==i))$epa_per_pass), linetype = "dashed", color="darkgreen") +
+  geom_vline(xintercept = mean((metrics_4Q %>% filter(team=="LA", season==i))$epa_per_pass), color="blue", linetype = "dashed") +
+    labs(title = paste0("EPA Per Pass for Playoff vs Non-Playoff Teams in ", i, "?"), subtitle = "Where do the LA Rams Fall?") 
+  
+  print(epa_density_plot)
+}
+
+#rush epa plots
+for (i in 2020:2022) {
+  epa_density_plot <- metrics_4Q %>%
+  #filter(season==i) %>%
+  ggplot(aes(x=epa_per_rush, fill=playoffs, group=playoffs)) +
+  geom_density(alpha=.25) +
+  #geom_vline(xintercept = mean((metrics_4Q %>% filter(playoffs==0, season==i))$epa_per_rush), linetype = "dashed", color="red") +
+  #geom_vline(xintercept = mean((metrics_4Q %>% filter(playoffs==1, season==i))$epa_per_rush), linetype = "dashed", color="darkgreen") +
+  geom_vline(xintercept = mean((metrics_4Q %>% filter(team=="LA", season==i))$epa_per_rush), color="blue", linetype = "dashed") +
+    labs(title = paste0("EPA Per Rush for Playoff vs Non-Playoff Teams in ", i, "?"), subtitle = "Where do the LA Rams Fall?")
+  
+  print(epa_density_plot)
+}
+
+#defensive pass epa 
+for (i in 2020:2022) {
+  epa_density_plot <- metrics_4Q %>%
+  #filter(season==i) %>%
+  ggplot(aes(x=def_epa_per_pass, fill=playoffs, group=playoffs)) +
+  geom_density(alpha=.25) +
+  #geom_vline(xintercept = mean((metrics_4Q %>% filter(playoffs==0, season==i))$def_epa_per_pass), linetype = "dashed", color="red") +
+  #geom_vline(xintercept = mean((metrics_4Q %>% filter(playoffs==1, season==i))$def_epa_per_pass), linetype = "dashed", color="darkgreen") +
+  geom_vline(xintercept = mean((metrics_4Q %>% filter(team=="LA", season==i))$def_epa_per_pass), color="blue", linetype = "dashed") +
+    labs(title = paste0("Defensive EPA Per Pass for Playoff vs Non-Playoff Teams in ", i, "?"), subtitle = "Where do the LA Rams Fall?")
+  
+  print(epa_density_plot)
+}
+
+#defensive rush epa 
+for (i in 2020:2022) {
+  epa_density_plot <- metrics_4Q %>%
+  #filter(season==i) %>%
+  ggplot(aes(x=def_epa_per_rush, fill=playoffs, group=playoffs)) +
+  geom_density(alpha=.25) +
+  #geom_vline(xintercept = mean((metrics_4Q %>% filter(playoffs==0, season==i))$def_epa_per_rush), linetype = "dashed", color="red") +
+  #geom_vline(xintercept = mean((metrics_4Q %>% filter(playoffs==1, season==i))$def_epa_per_rush), linetype = "dashed", color="darkgreen") +
+  geom_vline(xintercept = mean((metrics_4Q %>% filter(team=="LA", season==i))$def_epa_per_rush), color="blue", linetype = "dashed") +
+    labs(title = paste0("Defensive EPA Per Rush for Playoff vs Non-Playoff Teams in ", i, "?"), subtitle = "Where do the LA Rams Fall?")
+  
+  print(epa_density_plot)
+}
+
+
+logos <- nflreadr::load_teams()
+
+metrics_4Q %>%
+  inner_join(logos, by = c("team" = "team_abbr")) -> metrics_4Q2
+
+#scatterplots for pass vs rush epa
+for (i in 2022:2022) {
+  scatterplot <- metrics_4Q2 %>% 
+  filter(season==i) %>%
+  mutate(selected_team = ifelse(playoffs==1 | team=="LA", 0.9, 0.3), rams= ifelse(team=="LA", 1, 0)) %>% 
+  ggplot(aes(x = epa_per_rush, y = epa_per_pass)) +
+  #geom_abline(slope = -1.5, intercept = seq(0.4, -0.3, -0.1), alpha = .2) +
+  geom_vline(xintercept = mean((metrics_4Q2 %>% filter(playoffs==1))$epa_per_rush), color="red", linetype="dashed") +
+  geom_hline(yintercept = mean((metrics_4Q2 %>% filter(playoffs==1))$epa_per_pass), color="red", linetype="dashed") +
+  geom_point(aes(alpha = rams, color = rams), size = 12, show.legend = F) +
+  scale_colour_gradient(low = "white", high = "yellow") +
+ geom_nfl_logos(aes(team_abbr = team, alpha = selected_team), width = 0.065, show.legend = F) +
+  labs(
+    x = "Rush EPA/play",
+    y = "Pass EPA/play",
+    title = paste0(i, " NFL Pass and Rush EPA per Play"),
+    subtitle = "Rams + Playoff Teams are Highlighted"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = ggplot2::element_text(face = "bold"),
+    plot.title.position = "panel"
+  ) 
+  
+  print(scatterplot)
+}
+
+
+#scatterplots for defensive pass vs rush epa
+for (i in 2022:2022) {
+  scatterplot <- metrics_4Q2 %>% 
+  filter(season==i) %>%
+  mutate(selected_team = ifelse(playoffs==1 | team=="LA", 0.9, 0.3), rams= ifelse(team=="LA", 1, 0)) %>%   ggplot(aes(x = def_epa_per_rush, y = def_epa_per_pass)) +
+  #geom_abline(slope = -1.5, intercept = seq(0.4, -0.3, -0.1), alpha = .2) +
+  geom_vline(xintercept = mean((metrics_4Q2 %>% filter(playoffs==1))$def_epa_per_rush), color="red", linetype="dashed") +
+  geom_hline(yintercept = mean((metrics_4Q2 %>% filter(playoffs==1))$def_epa_per_pass), color="red", linetype="dashed") +
+  geom_point(aes(alpha = rams, color = rams), size = 12, show.legend = F) +
+  scale_colour_gradient(low = "white", high = "yellow") +
+ geom_nfl_logos(aes(team_abbr = team, alpha = selected_team), width = 0.065, show.legend = F) +
+  labs(
+    x = "Defensive Rush EPA/play",
+    y = "Defensive Pass EPA/play",
+    title = paste0(i, " NFL Defensive Pass and Rush EPA per Play"),
+    subtitle = "Rams + Playoff Teams are Highlighted"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = ggplot2::element_text(face = "bold"),
+    plot.title.position = "panel"
+  )
+  
+  print(scatterplot)
+}
+
+
+# highlight rams in yellow, unblur playoff teams
+# choose whether to compare to just season playoff teams or 2020-2022 playoff teams
+
+```
+
+## 9. More Specific KPIs
+
+```{r}
+ metrics_4Q <- pbp %>% 
+    filter(pass == 1 & !is.na(epa) | 
+      rush == 1 & !is.na(epa) | special == 1 & !is.na(epa)) %>% 
+    group_by(season, posteam) %>% 
+      summarize(
+        n_pass = sum(pass),
+        n_rush = sum(rush),
+        n_special = sum(special),
+        epa_per_pass = sum(epa*pass)/n_pass,
+        epa_per_rush = sum(epa*rush)/n_rush,
+        y_per_pass = sum(yards_gained*pass, na.rm = TRUE)/n_pass,
+        y_per_rush = sum(yards_gained*rush, na.rm = TRUE)/n_rush,
+        st_epa_per_play = sum(epa*special)/n_special
+      ) %>% 
+    left_join(
+      pbp %>%
+        filter(pass == 1 & !is.na(epa) | 
+      rush == 1 & !is.na(epa) | special == 1 & !is.na(epa), qtr==4
+      ) %>% 
+    group_by(season, defteam) %>% 
+      summarize(
+        def_n_pass=sum(pass),
+        def_n_rush=sum(rush),
+        def_n_special = sum(special),
+        def_epa_per_pass=sum(-epa*pass)/def_n_pass,
+        def_epa_per_rush=sum(-epa*rush)/def_n_rush,
+        def_y_per_pass = sum(yards_gained*pass, na.rm = TRUE)/def_n_pass,
+        def_y_per_rush = sum(yards_gained*rush, na.rm = TRUE)/def_n_rush,
+        def_st_epa_per_play = sum(-epa*special)/def_n_special
+      ),
+    by = c("season", "posteam" = "defteam")
+    ) %>% 
+    rename(team = "posteam") %>% 
+    select(-n_pass, -n_rush, -n_special,-def_n_pass, -def_n_rush, -def_n_special)
+ 
+metrics_4Q <- cbind(metrics_4Q, playoffs)
+metrics_4Q$playoffs <- as.factor(metrics_4Q$...13)
+metrics_4Q$...13 <- NULL
+
+
+
+ metrics_4Q_Rams_sections <- pbp %>% 
+    filter(pass == 1 & !is.na(epa) | 
+      rush == 1 & !is.na(epa) | special == 1 & !is.na(epa)) %>% 
+   mutate(section = case_when(week %in% 1:9 ~ 1,
+                              week %in% 10:13 ~ 2,
+                              week %in% 14:18 ~ 3)) %>%
+    group_by(season, posteam, section) %>% 
+      summarize(
+        n_pass = sum(pass),
+        n_rush = sum(rush),
+        n_special = sum(special),
+        epa_per_pass = sum(epa*pass)/n_pass,
+        epa_per_rush = sum(epa*rush)/n_rush,
+        y_per_pass = sum(yards_gained*pass, na.rm = TRUE)/n_pass,
+        y_per_rush = sum(yards_gained*rush, na.rm = TRUE)/n_rush,
+        st_epa_per_play = sum(epa*special)/n_special
+      ) %>% 
+    left_join(
+      pbp %>%
+        filter(pass == 1 & !is.na(epa) | 
+      rush == 1 & !is.na(epa) | special == 1 & !is.na(epa), qtr==4
+      ) %>% 
+    group_by(season, defteam) %>% 
+      summarize(
+        def_n_pass=sum(pass),
+        def_n_rush=sum(rush),
+        def_n_special = sum(special),
+        def_epa_per_pass=sum(-epa*pass)/def_n_pass,
+        def_epa_per_rush=sum(-epa*rush)/def_n_rush,
+        def_y_per_pass = sum(yards_gained*pass, na.rm = TRUE)/def_n_pass,
+        def_y_per_rush = sum(yards_gained*rush, na.rm = TRUE)/def_n_rush,
+        def_st_epa_per_play = sum(-epa*special)/def_n_special
+      ),
+    by = c("season", "posteam" = "defteam")
+    ) %>% 
+    rename(team = "posteam") %>% 
+    select(-n_pass, -n_rush, -n_special,-def_n_pass, -def_n_rush, -def_n_special) %>%
+   filter(team=="LA", season==2022)
+ 
+metrics_4Q_Rams_sections <- cbind(metrics_4Q_Rams_sections, c(0,0,0))
+metrics_4Q_Rams_sections$playoffs <- as.factor(metrics_4Q_Rams_sections$...14)
+metrics_4Q_Rams_sections$...14 <- NULL
+metrics_4Q_Rams_sections$section <- NULL
+
+metrics_4Q <- metrics_4Q %>%
+  filter(!(team == "LA" & season ==2022))
+metrics_4Q <- rbind(metrics_4Q, metrics_4Q_Rams_sections)
+
+#week breakdowns
+
+```
+
+## 10. More Comparing Playoff to Non-Playoff Teams (4th Quarter)
+
+```{r}
+logos <- nflreadr::load_teams()
+
+metrics_4Q %>%
+  inner_join(logos, by = c("team" = "team_abbr")) -> metrics_4Q2
+
+#scatterplots for pass vs rush epa
+for (i in 2022:2022) {
+  scatterplot <- metrics_4Q2 %>% 
+  filter(season==i) %>%
+  mutate(selected_team = ifelse(playoffs==1 | team=="LA", 0.9, 0.3), rams= ifelse(team=="LA", 1, 0)) %>% 
+  ggplot(aes(x = epa_per_rush, y = epa_per_pass)) +
+  #geom_abline(slope = -1.5, intercept = seq(0.4, -0.3, -0.1), alpha = .2) +
+  geom_vline(xintercept = mean((metrics_4Q2 %>% filter(playoffs==1))$epa_per_rush), color="red", linetype="dashed") +
+  geom_hline(yintercept = mean((metrics_4Q2 %>% filter(playoffs==1))$epa_per_pass), color="red", linetype="dashed") +
+  geom_point(aes(alpha = rams, color = rams), size = 12, show.legend = F) +
+  scale_colour_gradient(low = "white", high = "yellow") +
+ geom_nfl_logos(aes(team_abbr = team, alpha = selected_team), width = 0.065, show.legend = F) +
+  labs(
+    x = "Rush EPA/play",
+    y = "Pass EPA/play",
+    title = paste0(i, " NFL Pass and Rush EPA per Play"),
+    subtitle = "Rams + Playoff Teams are Highlighted"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = ggplot2::element_text(face = "bold"),
+    plot.title.position = "panel"
+  ) 
+  
+  print(scatterplot)
+}
+
+
+#scatterplots for defensive pass vs rush epa
+for (i in 2022:2022) {
+  scatterplot <- metrics_4Q2 %>% 
+  filter(season==i) %>%
+  mutate(selected_team = ifelse(playoffs==1 | team=="LA", 0.9, 0.3), rams= ifelse(team=="LA", 1, 0)) %>%   ggplot(aes(x = def_epa_per_rush, y = def_epa_per_pass)) +
+  #geom_abline(slope = -1.5, intercept = seq(0.4, -0.3, -0.1), alpha = .2) +
+  geom_vline(xintercept = mean((metrics_4Q2 %>% filter(playoffs==1))$def_epa_per_rush), color="red", linetype="dashed") +
+  geom_hline(yintercept = mean((metrics_4Q2 %>% filter(playoffs==1))$def_epa_per_pass), color="red", linetype="dashed") +
+  geom_point(aes(alpha = rams, color = rams), size = 12, show.legend = F) +
+  scale_colour_gradient(low = "white", high = "yellow") +
+ geom_nfl_logos(aes(team_abbr = team, alpha = selected_team), width = 0.065, show.legend = F) +
+  labs(
+    x = "Defensive Rush EPA/play",
+    y = "Defensive Pass EPA/play",
+    title = paste0(i, " NFL Defensive Pass and Rush EPA per Play"),
+    subtitle = "Rams + Playoff Teams are Highlighted"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = ggplot2::element_text(face = "bold"),
+    plot.title.position = "panel"
+  )
+  
+  print(scatterplot)
+}
+
+
+# highlight rams in yellow, unblur playoff teams
+# choose whether to compare to just season playoff teams or 2020-2022 playoff teams
+
+```
+
+## 11. Red Zone Analysis
+
+```{r}
+red_zone <- pbp %>% 
+  filter(drive_inside20==1, !is.na(posteam)) %>%
+  mutate(TD = ifelse(fixed_drive_result=="Touchdown", 1, 0)) %>%
+  distinct(season, game_id, posteam, drive, TD) %>%
+  group_by(season, posteam) %>% 
+  summarise(red_zone_drives = n(), 
+            TDs = sum(TD),
+            TD_rate = TDs/red_zone_drives)
+
+red_zone <- cbind(red_zone, playoffs)
+red_zone <- red_zone %>%
+  rename("playoffs" = `...6`)
+
+red_zone %>%
+  inner_join(logos, by = c("posteam" = "team_abbr")) -> red_zone2
+
+red_zone2 <- red_zone2 %>%
+  rename("team" = posteam)
+
+
+  scatterplot <- red_zone2 %>% 
+  filter(season==2022) %>%
+  mutate(selected_team = ifelse(playoffs==1 | team=="LA", 0.9, 0.3), rams= ifelse(team=="LA", 1, 0)) %>%   
+    ggplot(aes(x = red_zone_drives, y = TDs)) +
+  #geom_abline(slope = -1.5, intercept = seq(0.4, -0.3, -0.1), alpha = .2) +
+  geom_vline(xintercept = mean((red_zone2 %>% filter(playoffs==1))$red_zone_drives), color="red", linetype="dashed") +
+  geom_hline(yintercept = mean((red_zone2 %>% filter(playoffs==1))$TDs), color="red", linetype="dashed") +
+  geom_point(aes(alpha = rams, color = rams), size = 12, show.legend = F) +
+  scale_colour_gradient(low = "white", high = "yellow") +
+ geom_nfl_logos(aes(team_abbr = team, alpha = selected_team), width = 0.065, show.legend = F) +
+  labs(
+    x = "Red Zone Opportunities",
+    y = "Red Zone TDs",
+    title = "Red Zone Conversion Rate 2022",
+    subtitle = "Rams + Playoff Teams are Highlighted"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = ggplot2::element_text(face = "bold"),
+    plot.title.position = "panel"
+  ) +
+    geom_abline(slope=0.5605434, intercept = 0, alpha=0.4)
+  
+  print(scatterplot)
+
+  
+  red_zone3 <- left_join(red_zone2, outcomes, by=c("season", "team")) %>%
+    mutate(win_pct = wins/games)
+  
+  cor(red_zone3$win_pct, red_zone3$TD_rate)
+  
+  red_zone3 %>%
+    filter(team=="LA")
+```
